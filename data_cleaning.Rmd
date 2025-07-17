@@ -1,0 +1,345 @@
+---
+title: "DBA3702 Team 3 Group Project Data Cleaning File"
+output: html_document
+date: "2025-04-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r data cleaning, processing}
+# Load libraries
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr)
+library(reshape2)
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(RCurl)
+library(tibble)
+
+# Read data
+listings <- read_csv("data/listings.csv")
+neighbourhoods <- read_csv("data/neighbourhoods.csv")
+reviews <- read_csv("data/reviews.csv")
+
+# -------------------- 1. Clean Listings Data ------------------------
+
+# Select only important columns
+listings_clean <- listings %>%
+  select(
+    id, name, description, picture_url,
+    neighbourhood_cleansed, latitude, longitude,
+    property_type, room_type, accommodates, bathrooms_text, bedrooms, beds,
+    amenities,
+    price, minimum_nights,
+    number_of_reviews, review_scores_rating,
+    review_scores_accuracy, review_scores_cleanliness, review_scores_checkin,
+    review_scores_communication, review_scores_location, review_scores_value,
+    instant_bookable, host_is_superhost, host_response_time, host_response_rate,
+    host_acceptance_rate, reviews_per_month
+  )
+
+# Clean price column (remove "$" and ",")
+listings_clean <- listings_clean %>%
+  mutate(price = as.numeric(gsub("[$,]", "", price)))
+
+# Remove listings with missing important values
+listings_clean <- listings_clean %>%
+  filter(
+    !is.na(price),
+    !is.na(review_scores_rating),
+    !is.na(latitude),
+    !is.na(longitude)
+  )
+
+# Replace missing component review scores with overall review score 
+listings_clean <- listings_clean %>%
+  mutate(
+    review_scores_accuracy = ifelse(is.na(review_scores_accuracy), review_scores_rating, review_scores_accuracy),
+    review_scores_cleanliness = ifelse(is.na(review_scores_cleanliness), review_scores_rating, review_scores_cleanliness),
+    review_scores_checkin = ifelse(is.na(review_scores_checkin), review_scores_rating, review_scores_checkin),
+    review_scores_communication = ifelse(is.na(review_scores_communication), review_scores_rating, review_scores_communication),
+    review_scores_location = ifelse(is.na(review_scores_location), review_scores_rating, review_scores_location),
+    review_scores_value = ifelse(is.na(review_scores_value), review_scores_rating, review_scores_value)
+  )
+
+write_csv(listings_clean, "cleaned_listings.csv")
+
+# -------------------- 2. Clean Neighbourhood Data ------------------------
+
+# Neighbourhood data looks clean, but rename columns
+neighbourhoods_clean <- neighbourhoods %>%
+  rename(
+    region = neighbourhood_group,
+    neighbourhood = neighbourhood
+  )
+
+# -------------------- 3. Clean Reviews Data ------------------------
+
+# For reviews, we only keep relevant columns and filter out rows without meaningful review text.
+reviews_clean <- reviews %>%
+  select(listing_id, date, reviewer_id, reviewer_name, comments) %>%
+  filter(!is.na(comments) & comments != "")
+
+# -------------------- 4. Merge Listings with Region ------------------------
+
+# Merge region into listings
+listings_final <- listings_clean %>%
+  left_join(neighbourhoods_clean, by = c("neighbourhood_cleansed" = "neighbourhood"))
+listings_final <- listings_final %>%
+  select(-amenities)
+
+# -------------------- 6. Creating Seperate Amenities Dataset ------------------------
+
+# Step 1: Select and clean amenities column
+amenities_data <- listings_clean %>%
+  select(id, amenities) %>%
+  mutate(
+    amenities = str_remove_all(amenities, "\\{|\\}|\""),
+    amenities = str_trim(amenities)
+  ) %>%
+  filter(amenities != "")
+
+# Step 2: Separate into one row per amenity
+amenities_long <- amenities_data %>%
+  separate_rows(amenities, sep = ",") %>%
+  mutate(
+    amenities = str_trim(amenities)
+  ) %>%
+  filter(amenities != "")
+
+# Step 3: Add value column for pivot
+amenities_long <- amenities_long %>%
+  mutate(has_amenity = 1) %>%
+  distinct(id, amenities, .keep_all = TRUE)
+
+# Step 4: Pivot wider (one-hot encode)
+amenities_wide <- amenities_long %>%
+  pivot_wider(
+    names_from = amenities,
+    values_from = has_amenity,
+    values_fill = list(has_amenity = 0)
+  )
+
+# Step 5: Add total_amenities column
+amenities_wide$total_amenities <- rowSums(amenities_wide[ , -1])
+amenities_wide
+# Step 6: Save to CSV
+write_csv(amenities_wide, "amenities_matrix.csv")
+
+
+# -------------------- 7. Final Checks on cleaned data ------------------------
+
+# View cleaned data
+glimpse(listings_final)
+glimpse(reviews_clean)
+glimpse(neighbourhoods_clean)
+print(dim(listings_final))  # rows and columns
+print(dim(reviews_clean))   # rows and columns
+
+# Save cleaned files
+write_csv(listings_final, "cleaned_listings.csv")
+write_csv(reviews_clean, "cleaned_reviews.csv")
+write_csv(neighbourhoods_clean, "cleaned_neighbourhoods.csv")
+
+```
+
+API Integration & GeoJSON Ingestion 
+```{r  API Integration & GeoJSON Ingestion }
+# one way 
+base_url <- "https://developers.onemap.sg/commonapi/search"
+query <- "?searchVal=attraction&returnGeom=Y&getAddrDetails=Y&pageNum=1"
+full_url <- paste0(base_url, query)
+
+# Use RCurl's getURL() to fetch the data
+data_json <- getURL(full_url, .opts = list(timeout = 60))
+parsed_data <- fromJSON(data_json)
+
+# Convert the results into a tibble
+landmarks_df <- as_tibble(parsed_data$results)
+glimpse(landmarks_df)
+
+# ---------------------------
+# Function to Query OneMap API (second way)
+# ---------------------------
+
+set_config(timeout(60))
+query_onemap <- function(search_value, page = 1) {
+  base_url <- "https://developers.onemap.sg/commonapi/search"
+  params <- list(
+    searchVal = search_value,
+    returnGeom = "Y",      # return geometry (latitude/longitude)
+    getAddrDetails = "Y",  # return full address details
+    pageNum = as.character(page)
+  )
+  
+  # Make the GET request
+  res <- GET(base_url, query = params)
+  # Check for HTTP errors
+  stop_for_status(res)
+  
+  # Parse JSON and return the 'results' part
+  result <- fromJSON(content(res, "text", encoding = "UTF-8"))
+  # Return a data frame of results
+  return(as_tibble(result$results))
+}
+
+# ---------------------------
+# 1. Fetch Landmark Data (Tourist Attractions)
+# ---------------------------
+# We use the keyword "attraction" – you might adjust the keyword if needed.
+landmarks_df <- query_onemap("attraction", page = 1)
+# You might want to see the columns provided:
+print(glimpse(landmarks_df))
+# Typical useful columns: SEARCHVAL (name), LATITUDE, LONGITUDE, ROAD_NAME, etc.
+
+# ---------------------------
+# 2. Fetch Public Transport Data (MRT Stations)
+# ---------------------------
+# Use the keyword "MRT station"
+mrt_df <- query_onemap("MRT station", page = 1)
+print(glimpse(mrt_df))
+# You can inspect the results to see which columns (e.g. LATITUDE, LONGITUDE, ADDRESS) you want.
+
+# ---------------------------
+# 3. Fetch Bus Stop Data
+# ---------------------------
+# Similarly, search for "bus stop". Use a similar function call.
+bus_stops_df <- query_onemap("bus stop", page = 1)
+print(glimpse(bus_stops_df))
+
+# ---------------------------
+# 4. Save Data to CSV for Later Use
+# ---------------------------
+write.csv(landmarks_df, "landmarks_data.csv", row.names = FALSE)
+write.csv(mrt_df, "mrt_stations.csv", row.names = FALSE)
+write.csv(bus_stops_df, "bus_stops.csv", row.names = FALSE)
+
+```
+
+```{r}
+### Extract GeoJSON Information on Tourist Attractions
+# Load required libraries
+library(sf)
+library(tidyverse)
+library(stringr)
+library(writexl)
+library(readxl)
+
+# Step 1: Read the GeoJSON file
+geojson_file <- "data/Tourist Attractions.geojson"
+tourist_attractions <- st_read(geojson_file)
+
+# Step 2: Extract coordinates from geometry
+tourist_attractions <- tourist_attractions %>%
+  mutate(
+    Longitude = st_coordinates(geometry)[, 1],
+    Latitude = st_coordinates(geometry)[, 2]
+  )
+
+# Step 3: Clean HTML from the Description field
+remove_html_tags <- function(text) {
+  return(str_remove_all(as.character(text), "<[^>]+>"))
+}
+
+tourist_attractions <- tourist_attractions %>%
+  mutate(
+    CleanDescription = remove_html_tags(Description)
+  )
+
+# Step 4: Extract URL from Description (if any)
+extract_url <- function(text) {
+  match <- str_extract(text, "https?://[^\\s<\"]+")
+  return(match)
+}
+
+tourist_attractions <- tourist_attractions %>%
+  mutate(
+    URL = extract_url(Description)
+  )
+
+# Step 5: Drop geometry column and select desired fields
+cleaned_data <- tourist_attractions %>%
+  st_drop_geometry() %>%
+  select(Name, CleanDescription, URL, Longitude, Latitude)
+
+cleaned_data <- cleaned_data %>%
+  mutate(
+    CleanDescription = iconv(CleanDescription, from = "UTF-8", to = "ASCII//TRANSLIT", sub = "")
+  )
+
+write_xlsx(cleaned_data, "Cleaned_Tourist_Attractions_with_Names.xlsx")
+```
+
+```{r}
+### Add Name of Attraction Column
+cleaned_data <- read_excel("Cleaned_Tourist_Attractions_With_Names.xlsx")
+head(cleaned_data)
+
+# Define all known keys in order
+keys <- c(
+  "URL_PATH", "IMAGE_PATH", "IMAGE_ALT_TEXT", "PHOTOCREDITS", "PAGETITLE",
+  "LASTMODIFIED", "LATITUDE", "LONGTITUDE", "ADDRESS", "POSTALCODE",
+  "OVERVIEW", "EXTERNAL_LINK", "META_DESCRIPTION", "OPENING_HOURS",
+  "INC_CRC", "FMEL_UPD_D"
+)
+
+# Function to extract value between one key and the next
+extract_field <- function(text, field_name) {
+  idx <- match(field_name, keys)
+  if (is.na(idx) || idx == length(keys)) return(NA)  
+
+  next_key <- keys[idx + 1]
+  pattern <- paste0(field_name, "\\s+(.*?)\\s+", next_key)
+  match <- str_match(text, pattern)
+  return(trimws(match[,2]))
+}
+
+# Apply for PAGETITLE and META_DESCRIPTION
+cleaned_data <- cleaned_data %>%
+  mutate(
+    Attraction.Name = sapply(CleanDescription, extract_field, field_name = "PAGETITLE"),
+    Meta.Description = sapply(CleanDescription, extract_field, field_name = "META_DESCRIPTION"),
+    Address = sapply(CleanDescription, extract_field, field_name = "ADDRESS"),
+    Opening.Hours = sapply(CleanDescription, extract_field, field_name = "OPENING_HOURS")
+  )
+
+# Clean text by removing junk notation not in ASCII
+clean_text <- function(text) {
+  text <- as.character(text)
+  
+  text <- iconv(text, from = "UTF-8", to = "ASCII//TRANSLIT", sub = "")  
+  text <- str_replace_all(text, "[\r\n\t]", " ")                         
+  
+  # Fix common encoding glitches
+  text <- str_replace_all(text, "a\\?T|a\\?", "'")
+  text <- str_replace_all(text, "â€™|â€˜|â€œ|â€", "'")
+  text <- str_replace_all(text, "â€“|–", "-")
+  
+  # Normalize quotes
+  text <- str_replace_all(text, '[“”‘’"“]', "'")
+  text <- str_replace_all(text, "''", "-")                             
+  text <- str_replace_all(text, "a\"c", "")                             
+  
+  # Clean extra spaces
+  text <- str_replace_all(text, " +", " ")
+  text <- str_trim(text)
+  
+  return(text)
+}
+
+# Create and Return a Cleaned Data File
+cleaned_data <- cleaned_data %>%
+  mutate(
+    Attraction.Name = clean_text(Attraction.Name),
+    Meta.Description = clean_text(Meta.Description),
+    Address = clean_text(Address),
+    Opening.Hours = clean_text(Opening.Hours)
+  )
+
+write_xlsx(cleaned_data, "Cleaned_Tourist_Attractions_with_Names.xlsx")
+```
