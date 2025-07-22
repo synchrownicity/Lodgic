@@ -19,7 +19,7 @@ Travellers often struggle to find Airbnb listings that align with their specific
 You can directly test the Shiny application on the website listed above.
 
 If you would like to make your own changes, take care to follow these steps:
-- Ensure all the files in this repository are placed in the same directory.
+- Clone this repository.
 - Open `server.R` and `ui.R` in the same RStudio session.
 - You may make your changes in both of these files. `server.R` handles **server logic**, while `ui.R` handles the **front-end logic**.
 - Press the `Run App` button at the top right of the Code panel in RStudio. This will run the application.
