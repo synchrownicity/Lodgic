@@ -9,7 +9,7 @@ You can try the website out at the following link: https://synchrownicity.shinya
 | User Group | Purpose |
 |------------|---------|
 | Travellers | Discover listings based on price, room type and proximity to key amenities | 
-| Property Owners | Gain insights into local pricing dynamics, demand distribution, and market competition. |
+| Property Owners | Gain insights into local pricing dynamics, demand distribution, and market competition |
 
 Travellers often struggle to find Airbnb listings that align with their specific preferences, while property owners lack access to detailed market intelligence, making it difficult to identify under-served or oversaturated areas.
 
